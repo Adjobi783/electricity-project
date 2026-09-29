@@ -1,0 +1,28 @@
+{
+  "name": "powera",
+  "version": "1.0.0",
+  "description": "PowerA - Dashboard de gestion énergétique et coût des coupures électriques pour les entreprises en Côte d'Ivoire",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [
+    "electricity",
+    "energy",
+    "power",
+    "express",
+    "sqlite",
+    "ivory-coast",
+    "fcfa"
+  ],
+  "author": "PowerA Team",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.19"
+  }
+}

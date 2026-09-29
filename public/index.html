@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PowerA - Gestion Énergie</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>PowerA</h1>
+        <p>Logiciel de suivi de consommation énergétique, des coupures électriques et du coût d'inefficacité pour les entreprises et usines en Côte d'Ivoire.</p>
+      </header>
+
+      <section class="grid">
+        <div class="card">
+          <h2>Ajouter une entreprise</h2>
+          <form id="company-form">
+            <div class="form-grid">
+              <label>
+                Nom
+                <input type="text" name="name" placeholder="Ex : Palm Côte d'Ivoire" required />
+              </label>
+              <label>
+                Secteur
+                <input type="text" name="sector" placeholder="Ex : Agro-industrie" />
+              </label>
+              <label>
+                Localité
+                <input type="text" name="location" placeholder="Ex : Abidjan" />
+              </label>
+              <label>
+                Puissance installée (kW)
+                <input type="number" step="0.01" name="installed_power_kw" placeholder="0" />
+              </label>
+              <label>
+                Contact
+                <input type="text" name="contact_name" placeholder="Nom du responsable" />
+              </label>
+            </div>
+            <div style="margin-top: 14px;">
+              <button type="submit">Enregistrer l’entreprise</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Ajouter une consommation</h2>
+          <form id="consumption-form">
+            <div class="form-grid">
+              <label>
+                Entreprise
+                <select name="company_id" id="company-select-consumption" required></select>
+              </label>
+              <label>
+                Date
+                <input type="date" name="date" required />
+              </label>
+              <label>
+                Consommation (kWh)
+                <input type="number" step="0.01" name="kwh" placeholder="2000" required />
+              </label>
+              <label>
+                Source
+                <select name="source">
+                  <option value="CIE">CIE</option>
+                  <option value="GROUP ELECTROGENE">Groupe électrogène</option>
+                </select>
+              </label>
+            </div>
+            <div style="margin-top: 14px;">
+              <button type="submit">Ajouter la consommation</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Ajouter une coupure</h2>
+          <form id="outage-form">
+            <div class="form-grid">
+              <label>
+                Entreprise
+                <select name="company_id" id="company-select-outage" required></select>
+              </label>
+              <label>
+                Début
+                <input type="datetime-local" name="start_time" required />
+              </label>
+              <label>
+                Fin
+                <input type="datetime-local" name="end_time" required />
+              </label>
+              <label>
+                Durée (heures)
+                <input type="number" step="0.1" name="duration_hours" placeholder="2.5" required />
+              </label>
+              <label>
+                Puissance concernée (kW)
+                <input type="number" step="0.1" name="affected_power_kw" placeholder="120" required />
+              </label>
+              <label>
+                Type
+                <select name="outage_type">
+                  <option value="coupure">Coupure</option>
+                  <option value="baisse de tension">Baisse de tension</option>
+                  <option value="maintenance">Maintenance</option>
+                </select>
+              </label>
+            </div>
+            <label style="margin-top: 12px;">
+              Notes
+              <textarea name="notes" placeholder="Décrivez l'impact de la coupure"></textarea>
+            </label>
+            <div style="margin-top: 14px;">
+              <button type="submit">Enregistrer la coupure</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="card select-row">
+        <h2>Analyse énergétique</h2>
+        <label>
+          Sélectionner une entreprise
+          <select id="company-summary-select"></select>
+        </label>
+      </section>
+
+      <section class="metrics" id="summary-metrics">
+        <div class="metric-box">
+          <div class="label">Consommation totale</div>
+          <div class="value" id="total-consumption">0 kWh</div>
+        </div>
+        <div class="metric-box">
+          <div class="label">Coût CIE</div>
+          <div class="value" id="cie-cost">0 FCFA</div>
+        </div>
+        <div class="metric-box">
+          <div class="label">Coût groupe</div>
+          <div class="value" id="generator-cost">0 FCFA</div>
+        </div>
+        <div class="metric-box">
+          <div class="label">Perte de production</div>
+          <div class="value" id="production-loss">0 FCFA</div>
+        </div>
+        <div class="metric-box">
+          <div class="label">Coût total</div>
+          <div class="value" id="total-cost">0 FCFA</div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="card">
+          <h2>Historique des consommations</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Source</th>
+                  <th>kWh</th>
+                  <th>Coût FCFA</th>
+                </tr>
+              </thead>
+              <tbody id="consumption-table-body">
+                <tr>
+                  <td colspan="4" class="empty-state">Aucune donnée disponible.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Historique des coupures</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Début</th>
+                  <th>Fin</th>
+                  <th>Heures</th>
+                  <th>kW impacté</th>
+                </tr>
+              </thead>
+              <tbody id="outage-table-body">
+                <tr>
+                  <td colspan="4" class="empty-state">Aucune coupure enregistrée.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
