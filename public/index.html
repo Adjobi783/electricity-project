@@ -1,624 +1,259 @@
-const express = require('express');
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
-const fs = require('fs');
-const bcrypt = require('bcryptjs');
-const session = require('express-session');
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-const DB_DIR = path.join(__dirname, 'data');
-const DB_PATH = path.join(DB_DIR, 'powera.db');
-
-const CIE_TARIFF_KWH = 100;
-const GENERATOR_FUEL_PRICE_FCFA = 850;
-const GENERATOR_LITERS_PER_KWH = 0.25;
-const PRODUCTION_VALUE_PER_KWH = 4500;
-
-if (!fs.existsSync(DB_DIR)) {
-  fs.mkdirSync(DB_DIR, { recursive: true });
-}
-
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || 'powera-secret-key-2026',
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: 'lax',
-      maxAge: 60 * 60 * 1000
-    }
-  })
-);
-
-const db = new sqlite3.Database(DB_PATH, async (err) => {
-  if (err) {
-    console.error('Erreur de connexion à la base de données :', err.message);
-    process.exit(1);
-  }
-
-  console.log('Connexion SQLite établie :', DB_PATH);
-  await initializeDatabase();
-  console.log('Initialisation PowerA terminée.');
-});
-
-function runQuery(query, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(query, params, function (err) {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve({ id: this.lastID, changes: this.changes });
-    });
-  });
-}
-
-function getAll(query, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(query, params, (err, rows) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(rows);
-    });
-  });
-}
-
-function getOne(query, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(query, params, (err, row) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(row);
-    });
-  });
-}
-
-async function initializeDatabase() {
-  const queries = [
-    `CREATE TABLE IF NOT EXISTS companies (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      sector TEXT,
-      location TEXT,
-      installed_power_kw REAL DEFAULT 0,
-      contact_name TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )`,
-    `CREATE TABLE IF NOT EXISTS consumption_records (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      company_id INTEGER NOT NULL,
-      date TEXT NOT NULL,
-      kwh REAL NOT NULL,
-      source TEXT NOT NULL,
-      cost_estimate_fcfa REAL DEFAULT 0,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(company_id) REFERENCES companies(id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS outages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      company_id INTEGER NOT NULL,
-      start_time TEXT NOT NULL,
-      end_time TEXT NOT NULL,
-      duration_hours REAL NOT NULL,
-      affected_power_kw REAL NOT NULL,
-      outage_type TEXT DEFAULT 'coupure',
-      notes TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(company_id) REFERENCES companies(id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'manager',
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )`
-  ];
-
-  for (const query of queries) {
-    await runQuery(query);
-  }
-
-  await ensureDefaultAdmin();
-}
-
-async function ensureDefaultAdmin() {
-  const existing = await getOne('SELECT id FROM users WHERE email = ?', ['admin@powera.local']);
-  if (!existing) {
-    const defaultPassword = 'Admin123!';
-    const passwordHash = await bcrypt.hash(defaultPassword, 10);
-    await runQuery(
-      'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
-      ['Administrateur', 'admin@powera.local', passwordHash, 'admin']
-    );
-    console.log('Compte administrateur créé : admin@powera.local / Admin123!');
-  }
-}
-
-function roundToTwo(value) {
-  return Number(value.toFixed(2));
-}
-
-function calculateCieCost(kwh) {
-  return roundToTwo(kwh * CIE_TARIFF_KWH);
-}
-
-function calculateGeneratorCost(durationHours, affectedPowerKw) {
-  const liters = durationHours * affectedPowerKw * GENERATOR_LITERS_PER_KWH;
-  return roundToTwo(liters * GENERATOR_FUEL_PRICE_FCFA);
-}
-
-function calculateProductionLoss(durationHours, affectedPowerKw) {
-  const lostEnergyKwh = durationHours * affectedPowerKw;
-  return roundToTwo(lostEnergyKwh * PRODUCTION_VALUE_PER_KWH);
-}
-
-function getCompanySummary(companyId) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const company = await getOne('SELECT * FROM companies WHERE id = ?', [companyId]);
-      if (!company) {
-        resolve({
-          company: null,
-          totalConsumptionKwh: 0,
-          totalOutageHours: 0,
-          cieCost: 0,
-          generatorCost: 0,
-          productionLoss: 0,
-          totalCost: 0,
-          consommationRecords: [],
-          outages: []
-        });
-        return;
-      }
-
-      const consumptionRecords = await getAll(
-        'SELECT * FROM consumption_records WHERE company_id = ? ORDER BY date DESC',
-        [companyId]
-      );
-
-      const outages = await getAll(
-        'SELECT * FROM outages WHERE company_id = ? ORDER BY start_time DESC',
-        [companyId]
-      );
-
-      const totalConsumptionKwh = consumptionRecords.reduce((sum, row) => sum + Number(row.kwh || 0), 0);
-      const totalOutageHours = outages.reduce((sum, row) => sum + Number(row.duration_hours || 0), 0);
-      const cieCost = consumptionRecords.reduce((sum, row) => sum + Number(row.cost_estimate_fcfa || 0), 0);
-      const generatorCost = outages.reduce((sum, row) => {
-        return sum + calculateGeneratorCost(Number(row.duration_hours || 0), Number(row.affected_power_kw || 0));
-      }, 0);
-      const productionLoss = outages.reduce((sum, row) => {
-        return sum + calculateProductionLoss(Number(row.duration_hours || 0), Number(row.affected_power_kw || 0));
-      }, 0);
-      const totalCost = cieCost + generatorCost + productionLoss;
-
-      resolve({
-        company,
-        totalConsumptionKwh: roundToTwo(totalConsumptionKwh),
-        totalOutageHours: roundToTwo(totalOutageHours),
-        cieCost: roundToTwo(cieCost),
-        generatorCost: roundToTwo(generatorCost),
-        productionLoss: roundToTwo(productionLoss),
-        totalCost: roundToTwo(totalCost),
-        consommationRecords: consumptionRecords,
-        outages
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function requireAuth(req, res, next) {
-  if (!req.session || !req.session.user) {
-    return res.status(401).json({ error: 'Authentification requise.' });
-  }
-  next();
-}
-
-function requireRole(allowedRoles) {
-  const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
-
-  return (req, res, next) => {
-    if (!req.session || !req.session.user) {
-      return res.status(401).json({ error: 'Authentification requise.' });
-    }
-
-    if (!roles.includes(req.session.user.role)) {
-      return res.status(403).json({ error: 'Accès interdit pour ce rôle.' });
-    }
-
-    next();
-  };
-}
-
-function generateRecommendations(analytics) {
-  const recommendations = [];
-
-  if (analytics.totalOutageHours > 18) {
-    recommendations.push('Réduire les coupures prolongées en renforçant la stabilité du réseau et la préparation des groupes électrogènes.');
-  }
-
-  if (analytics.averageConsumptionPerMonth > 2500) {
-    recommendations.push('Optimiser les charges pendant les heures de pointe pour diminuer la consommation électrique et la facture mensuelle.');
-  }
-
-  if (analytics.generatorCost > analytics.cieCost) {
-    recommendations.push('Le coût de secours électrique dépasse le coût standard. Il est conseillé de revoir la stratégie de production et la maintenance des équipements.');
-  }
-
-  if (analytics.productionLoss > 1000000) {
-    recommendations.push('La perte de production est élevée. Mettre en place une gestion stricte des seuils critiques et des alarmes de coupure.');
-  }
-
-  if (!recommendations.length) {
-    recommendations.push('Les performances énergétiques de cette entreprise sont stables. Continuer le suivi mensuel et les correctifs préventifs.');
-  }
-
-  return recommendations;
-}
-
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    message: 'PowerA est en ligne',
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.post('/api/auth/register', async (req, res) => {
-  const { name, email, password, role } = req.body;
-
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: 'Nom, email et mot de passe sont obligatoires.' });
-  }
-
-  if (String(password).length < 6) {
-    return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères.' });
-  }
-
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const userRole = role === 'admin' ? 'admin' : 'manager';
-
-  try {
-    const existing = await getOne('SELECT * FROM users WHERE email = ?', [normalizedEmail]);
-    if (existing) {
-      return res.status(409).json({ error: 'Un compte existe déjà avec cet email.' });
-    }
-
-    const passwordHash = await bcrypt.hash(String(password), 10);
-    const result = await runQuery(
-      'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
-      [String(name).trim(), normalizedEmail, passwordHash, userRole]
-    );
-
-    const user = await getOne('SELECT id, name, email, role FROM users WHERE id = ?', [result.id]);
-    req.session.user = user;
-
-    res.status(201).json({ message: 'Compte créé avec succès.', user });
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de créer le compte utilisateur.', details: error.message });
-  }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email et mot de passe sont requis.' });
-  }
-
-  try {
-    const normalizedEmail = String(email).trim().toLowerCase();
-    const user = await getOne('SELECT * FROM users WHERE email = ?', [normalizedEmail]);
-
-    if (!user) {
-      return res.status(401).json({ error: 'Identifiants invalides.' });
-    }
-
-    const isPasswordValid = await bcrypt.compare(String(password), user.password_hash);
-    if (!isPasswordValid) {
-      return res.status(401).json({ error: 'Identifiants invalides.' });
-    }
-
-    req.session.user = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role
-    };
-
-    res.json({ message: 'Connexion réussie.', user: req.session.user });
-  } catch (error) {
-    res.status(500).json({ error: 'Erreur de connexion.', details: error.message });
-  }
-});
-
-app.post('/api/auth/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      return res.status(500).json({ error: 'Impossible de fermer la session.' });
-    }
-
-    res.clearCookie('connect.sid');
-    res.json({ message: 'Déconnexion réussie.' });
-  });
-});
-
-app.get('/api/auth/me', (req, res) => {
-  if (!req.session || !req.session.user) {
-    return res.status(401).json({ error: 'Non authentifié.' });
-  }
-
-  res.json(req.session.user);
-});
-
-app.get('/api/users', requireAuth, requireRole(['admin']), async (req, res) => {
-  try {
-    const users = await getAll('SELECT id, name, email, role, created_at FROM users ORDER BY created_at DESC');
-    res.json(users);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de récupérer les utilisateurs.', details: error.message });
-  }
-});
-
-app.get('/api/companies', requireAuth, async (req, res) => {
-  try {
-    const companies = await getAll('SELECT * FROM companies ORDER BY created_at DESC');
-    res.json(companies);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de récupérer les entreprises', details: error.message });
-  }
-});
-
-app.post('/api/companies', requireAuth, async (req, res) => {
-  const { name, sector, location, installed_power_kw, contact_name } = req.body;
-
-  if (!name || !name.trim()) {
-    return res.status(400).json({ error: 'Le nom de l’entreprise est obligatoire.' });
-  }
-
-  try {
-    const result = await runQuery(
-      'INSERT INTO companies (name, sector, location, installed_power_kw, contact_name) VALUES (?, ?, ?, ?, ?)',
-      [name.trim(), sector || '', location || '', Number(installed_power_kw || 0), contact_name || '']
-    );
-
-    const company = await getOne('SELECT * FROM companies WHERE id = ?', [result.id]);
-    res.status(201).json(company);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible d’ajouter l’entreprise', details: error.message });
-  }
-});
-
-app.get('/api/consumption', requireAuth, async (req, res) => {
-  const { companyId } = req.query;
-
-  try {
-    let query = 'SELECT * FROM consumption_records';
-    let params = [];
-
-    if (companyId) {
-      query += ' WHERE company_id = ?';
-      params.push(Number(companyId));
-    }
-
-    query += ' ORDER BY date DESC';
-
-    const records = await getAll(query, params);
-    res.json(records);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de récupérer les consommations', details: error.message });
-  }
-});
-
-app.post('/api/consumption', requireAuth, async (req, res) => {
-  const { company_id, date, kwh, source } = req.body;
-
-  if (!company_id || !date || !kwh) {
-    return res.status(400).json({ error: 'Tous les champs obligatoires doivent être remplis.' });
-  }
-
-  try {
-    const energyKwh = Number(kwh);
-    const cieCost = calculateCieCost(energyKwh);
-
-    const result = await runQuery(
-      'INSERT INTO consumption_records (company_id, date, kwh, source, cost_estimate_fcfa) VALUES (?, ?, ?, ?, ?)',
-      [Number(company_id), date, energyKwh, source || 'CIE', cieCost]
-    );
-
-    const record = await getOne('SELECT * FROM consumption_records WHERE id = ?', [result.id]);
-    res.status(201).json(record);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible d’ajouter la consommation', details: error.message });
-  }
-});
-
-app.get('/api/outages', requireAuth, async (req, res) => {
-  const { companyId } = req.query;
-
-  try {
-    let query = 'SELECT * FROM outages';
-    let params = [];
-
-    if (companyId) {
-      query += ' WHERE company_id = ?';
-      params.push(Number(companyId));
-    }
-
-    query += ' ORDER BY start_time DESC';
-
-    const outages = await getAll(query, params);
-    res.json(outages);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de récupérer les coupures', details: error.message });
-  }
-});
-
-app.post('/api/outages', requireAuth, async (req, res) => {
-  const {
-    company_id,
-    start_time,
-    end_time,
-    duration_hours,
-    affected_power_kw,
-    outage_type,
-    notes
-  } = req.body;
-
-  if (!company_id || !start_time || !end_time || !duration_hours || !affected_power_kw) {
-    return res.status(400).json({
-      error: 'Les champs de la coupure sont incomplets.'
-    });
-  }
-
-  try {
-    const startDate = new Date(start_time);
-    const endDate = new Date(end_time);
-
-    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
-      return res.status(400).json({ error: 'Les dates de début et de fin de coupure sont invalides.' });
-    }
-
-    const duration = Number(duration_hours);
-    const power = Number(affected_power_kw);
-
-    const result = await runQuery(
-      `INSERT INTO outages (company_id, start_time, end_time, duration_hours, affected_power_kw, outage_type, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [Number(company_id), start_time, end_time, duration, power, outage_type || 'coupure', notes || '']
-    );
-
-    const outage = await getOne('SELECT * FROM outages WHERE id = ?', [result.id]);
-    res.status(201).json(outage);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible d’ajouter la coupure', details: error.message });
-  }
-});
-
-app.get('/api/summary', requireAuth, async (req, res) => {
-  const { companyId } = req.query;
-
-  if (!companyId) {
-    return res.status(400).json({ error: 'L’identifiant de l’entreprise est requis.' });
-  }
-
-  try {
-    const summary = await getCompanySummary(Number(companyId));
-    res.json(summary);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de calculer le bilan énergétique', details: error.message });
-  }
-});
-
-app.get('/api/analytics/:companyId', requireAuth, async (req, res) => {
-  const companyId = Number(req.params.companyId);
-
-  if (!companyId) {
-    return res.status(400).json({ error: 'Identifiant d’entreprise invalide.' });
-  }
-
-  try {
-    const company = await getOne('SELECT * FROM companies WHERE id = ?', [companyId]);
-    if (!company) {
-      return res.status(404).json({ error: 'Entreprise introuvable.' });
-    }
-
-    const consumptionRecords = await getAll(
-      'SELECT * FROM consumption_records WHERE company_id = ? ORDER BY date ASC',
-      [companyId]
-    );
-
-    const outages = await getAll(
-      'SELECT * FROM outages WHERE company_id = ? ORDER BY start_time ASC',
-      [companyId]
-    );
-
-    const totalConsumption = consumptionRecords.reduce((sum, row) => sum + Number(row.kwh || 0), 0);
-    const totalOutageHours = outages.reduce((sum, row) => sum + Number(row.duration_hours || 0), 0);
-    const totalGeneratorCost = outages.reduce((sum, row) => sum + calculateGeneratorCost(Number(row.duration_hours || 0), Number(row.affected_power_kw || 0)), 0);
-    const totalProductionLoss = outages.reduce((sum, row) => sum + calculateProductionLoss(Number(row.duration_hours || 0), Number(row.affected_power_kw || 0)), 0);
-    const totalCieCost = consumptionRecords.reduce((sum, row) => sum + Number(row.cost_estimate_fcfa || 0), 0);
-
-    const monthlyTrendMap = new Map();
-    for (const record of consumptionRecords) {
-      const date = new Date(record.date);
-      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-      const label = `${date.toLocaleString('fr-FR', { month: 'short' })} ${date.getFullYear()}`;
-      const actualValue = Number(record.kwh || 0);
-
-      if (!monthlyTrendMap.has(monthKey)) {
-        monthlyTrendMap.set(monthKey, { label, value: 0 });
-      }
-
-      monthlyTrendMap.get(monthKey).value += actualValue;
-    }
-
-    const monthlyTrend = Array.from(monthlyTrendMap.values()).slice(-6);
-    const sourceBreakdown = {};
-    for (const record of consumptionRecords) {
-      const sourceName = record.source || 'CIE';
-      if (!sourceBreakdown[sourceName]) {
-        sourceBreakdown[sourceName] = { kwh: 0, cost: 0 };
-      }
-      sourceBreakdown[sourceName].kwh += Number(record.kwh || 0);
-      sourceBreakdown[sourceName].cost += Number(record.cost_estimate_fcfa || 0);
-    }
-
-    const outageTypes = {};
-    for (const outage of outages) {
-      const key = outage.outage_type || 'coupure';
-      if (!outageTypes[key]) {
-        outageTypes[key] = 0;
-      }
-      outageTypes[key] += Number(outage.duration_hours || 0);
-    }
-
-    const averageConsumptionPerMonth = monthlyTrend.length ? (totalConsumption / monthlyTrend.length) : 0;
-
-    const analytics = {
-      company,
-      totalConsumption,
-      totalOutageHours,
-      totalCieCost,
-      totalGeneratorCost,
-      totalProductionLoss,
-      averageConsumptionPerMonth: roundToTwo(averageConsumptionPerMonth),
-      monthlyTrend,
-      sourceBreakdown,
-      outageTypes,
-      recommendations: generateRecommendations({
-        totalOutageHours,
-        averageConsumptionPerMonth,
-        generatorCost: totalGeneratorCost,
-        productionLoss: totalProductionLoss,
-        cieCost: totalCieCost
-      })
-    };
-
-    res.json(analytics);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de calculer les statistiques avancées', details: error.message });
-  }
-});
-
-app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-app.listen(PORT, () => {
-  console.log(`PowerA démarré sur http://localhost:${PORT}`);
-});
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PowerA</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header class="topbar">
+        <div>
+          <h1>PowerA</h1>
+          <p>Gestion énergétique et analyse des coupures</p>
+        </div>
+        <div id="user-box" class="user-box hidden">
+          <span id="user-name">Utilisateur</span>
+          <button id="logout-btn" type="button">Déconnexion</button>
+        </div>
+      </header>
+
+      <section id="auth-section" class="auth-shell">
+        <div class="card auth-card">
+          <h2>Connexion</h2>
+          <form id="login-form">
+            <div class="form-grid">
+              <label>
+                Email
+                <input type="email" name="email" required />
+              </label>
+              <label>
+                Mot de passe
+                <input type="password" name="password" required />
+              </label>
+            </div>
+            <button type="submit" style="margin-top: 16px;">Se connecter</button>
+          </form>
+        </div>
+
+        <div class="card auth-card">
+          <h2>Créer un compte</h2>
+          <form id="register-form">
+            <div class="form-grid">
+              <label>
+                Nom
+                <input type="text" name="name" required />
+              </label>
+              <label>
+                Email
+                <input type="email" name="email" required />
+              </label>
+              <label>
+                Mot de passe
+                <input type="password" name="password" required />
+              </label>
+            </div>
+            <button type="submit" style="margin-top: 16px;">Créer le compte</button>
+          </form>
+        </div>
+      </section>
+
+      <main id="dashboard" class="hidden">
+        <section class="card select-row">
+          <label>
+            Entreprise
+            <select id="company-summary-select"></select>
+          </label>
+        </section>
+
+        <section class="metrics">
+          <div class="metric-box">
+            <div class="label">Consommation totale</div>
+            <div id="total-consumption" class="value">0 kWh</div>
+          </div>
+          <div class="metric-box">
+            <div class="label">Coût CIE</div>
+            <div id="cie-cost" class="value">0 FCFA</div>
+          </div>
+          <div class="metric-box">
+            <div class="label">Coût générateur</div>
+            <div id="generator-cost" class="value">0 FCFA</div>
+          </div>
+          <div class="metric-box">
+            <div class="label">Perte de production</div>
+            <div id="production-loss" class="value">0 FCFA</div>
+          </div>
+          <div class="metric-box">
+            <div class="label">Coût total</div>
+            <div id="total-cost" class="value">0 FCFA</div>
+          </div>
+        </section>
+
+        <section class="analytics-panel">
+          <div class="card analytics-card">
+            <h2>Tendance mensuelle</h2>
+            <canvas id="monthlyChart"></canvas>
+          </div>
+          <div class="card analytics-card">
+            <h2>Répartition par source</h2>
+            <canvas id="sourceChart"></canvas>
+          </div>
+          <div class="card analytics-card">
+            <h2>Types de coupures</h2>
+            <canvas id="outageChart"></canvas>
+          </div>
+        </section>
+
+        <section class="grid">
+          <div class="card">
+            <h2>Ajouter une entreprise</h2>
+            <form id="company-form">
+              <div class="form-grid">
+                <label>
+                  Nom
+                  <input type="text" name="name" required />
+                </label>
+                <label>
+                  Secteur
+                  <input type="text" name="sector" />
+                </label>
+                <label>
+                  Localisation
+                  <input type="text" name="location" />
+                </label>
+                <label>
+                  Puissance installée (kW)
+                  <input type="number" name="installed_power_kw" step="0.01" />
+                </label>
+                <label>
+                  Contact
+                  <input type="text" name="contact_name" />
+                </label>
+              </div>
+              <button type="submit" style="margin-top: 16px;">Enregistrer</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <h2>Ajouter une consommation</h2>
+            <form id="consumption-form">
+              <div class="form-grid">
+                <label>
+                  Entreprise
+                  <select id="company-select-consumption" name="company_id" required></select>
+                </label>
+                <label>
+                  Date
+                  <input type="date" name="date" required />
+                </label>
+                <label>
+                  Quantité (kWh)
+                  <input type="number" name="kwh" step="0.01" required />
+                </label>
+                <label>
+                  Source
+                  <select name="source">
+                    <option value="CIE">CIE</option>
+                    <option value="Générateur">Générateur</option>
+                    <option value="Solaire">Solaire</option>
+                  </select>
+                </label>
+              </div>
+              <button type="submit" style="margin-top: 16px;">Enregistrer</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <h2>Ajouter une coupure</h2>
+            <form id="outage-form">
+              <div class="form-grid">
+                <label>
+                  Entreprise
+                  <select id="company-select-outage" name="company_id" required></select>
+                </label>
+                <label>
+                  Type
+                  <select name="outage_type">
+                    <option value="coupure">Coupure</option>
+                    <option value="baisse">Baisse</option>
+                    <option value="surcharge">Surcharge</option>
+                  </select>
+                </label>
+                <label>
+                  Début
+                  <input type="datetime-local" name="start_time" required />
+                </label>
+                <label>
+                  Fin
+                  <input type="datetime-local" name="end_time" required />
+                </label>
+                <label>
+                  Durée (h)
+                  <input type="number" name="duration_hours" step="0.01" required />
+                </label>
+                <label>
+                  Puissance affectée (kW)
+                  <input type="number" name="affected_power_kw" step="0.01" required />
+                </label>
+                <label style="grid-column: 1 / -1;">
+                  Notes
+                  <textarea name="notes"></textarea>
+                </label>
+              </div>
+              <button type="submit" style="margin-top: 16px;">Enregistrer</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="grid">
+          <div class="card">
+            <h2>Consommations</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Source</th>
+                    <th>kWh</th>
+                    <th>Coût</th>
+                  </tr>
+                </thead>
+                <tbody id="consumption-table-body">
+                  <tr><td colspan="4" class="empty-state">Aucune donnée</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Coupures</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Début</th>
+                    <th>Fin</th>
+                    <th>Durée</th>
+                    <th>Puissance</th>
+                  </tr>
+                </thead>
+                <tbody id="outage-table-body">
+                  <tr><td colspan="4" class="empty-state">Aucune donnée</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Recommandations</h2>
+          <ul id="recommendations-list" class="recommendations-list"></ul>
+        </section>
+      </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
