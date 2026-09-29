@@ -12,6 +12,7 @@ const companySelects = [
 
 const consumptionTableBody = document.getElementById('consumption-table-body');
 const outageTableBody = document.getElementById('outage-table-body');
+const recommendationsList = document.getElementById('recommendations-list');
 
 const summaryFields = {
   totalConsumption: document.getElementById('total-consumption'),
@@ -20,6 +21,10 @@ const summaryFields = {
   productionLoss: document.getElementById('production-loss'),
   totalCost: document.getElementById('total-cost')
 };
+
+let monthlyChart = null;
+let sourceChart = null;
+let outageChart = null;
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString('fr-FR', {
@@ -59,7 +64,7 @@ async function fetchJson(url, options = {}) {
     credentials: 'same-origin',
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       ...(options.headers || {})
     }
   });
@@ -147,6 +152,118 @@ function resetSummary() {
   summaryFields.totalCost.textContent = '0 FCFA';
   renderConsumptionRows([]);
   renderOutageRows([]);
+  recommendationsList.innerHTML = '<li>Aucune donnée pour l’analyse.</li>';
+
+  if (monthlyChart) {
+    monthlyChart.data.labels = ['Aucune donnée'];
+    monthlyChart.data.datasets[0].data = [0];
+    monthlyChart.update();
+  }
+
+  if (sourceChart) {
+    sourceChart.data.labels = ['Aucun'];
+    sourceChart.data.datasets[0].data = [0];
+    sourceChart.update();
+  }
+
+  if (outageChart) {
+    outageChart.data.labels = ['Aucune'];
+    outageChart.data.datasets[0].data = [0];
+    outageChart.update();
+  }
+}
+
+function initCharts() {
+  const chartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        position: 'bottom'
+      }
+    },
+    scales: {
+      y: {
+        beginAtZero: true
+      }
+    }
+  };
+
+  monthlyChart = new Chart(document.getElementById('monthlyChart'), {
+    type: 'line',
+    data: {
+      labels: ['Aucune donnée'],
+      datasets: [{
+        label: 'Consommation (kWh)',
+        data: [0],
+        borderColor: '#1f6fbf',
+        backgroundColor: 'rgba(31, 111, 191, 0.2)',
+        fill: true,
+        tension: 0.3
+      }]
+    },
+    options: chartOptions
+  });
+
+  sourceChart = new Chart(document.getElementById('sourceChart'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Aucun'],
+      datasets: [{
+        data: [1],
+        backgroundColor: ['#0f6bdc']
+      }]
+    },
+    options: chartOptions
+  });
+
+  outageChart = new Chart(document.getElementById('outageChart'), {
+    type: 'bar',
+    data: {
+      labels: ['Aucune'],
+      datasets: [{
+        label: 'Heures',
+        data: [0],
+        backgroundColor: '#f39c12'
+      }]
+    },
+    options: chartOptions
+  });
+}
+
+function renderRecommendations(items) {
+  recommendationsList.innerHTML = items.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
+}
+
+function renderAnalytics(analytics) {
+  if (!analytics) {
+    resetSummary();
+    return;
+  }
+
+  const monthlyLabels = analytics.monthlyTrend.map((entry) => entry.label);
+  const monthlyValues = analytics.monthlyTrend.map((entry) => Number(entry.value || 0));
+  monthlyChart.data.labels = monthlyLabels.length ? monthlyLabels : ['Aucune donnée'];
+  monthlyChart.data.datasets[0].data = monthlyValues.length ? monthlyValues : [0];
+  monthlyChart.update();
+
+  const sourceEntries = Object.entries(analytics.sourceBreakdown || {});
+  const sourceLabels = sourceEntries.length ? sourceEntries.map(([key]) => key) : ['Aucun'];
+  const sourceValues = sourceEntries.length ? sourceEntries.map(([, value]) => Number(value.kwh || 0)) : [0];
+  sourceChart.data.labels = sourceLabels;
+  sourceChart.data.datasets[0].data = sourceValues;
+  sourceChart.data.datasets[0].backgroundColor = ['#0f6bdc', '#1abc9c', '#f39c12', '#e74c3c', '#8e44ad'];
+  sourceChart.update();
+
+  const outageEntries = Object.entries(analytics.outageTypes || {});
+  const outageLabels = outageEntries.length ? outageEntries.map(([key]) => key) : ['Aucune'];
+  const outageValues = outageEntries.length ? outageEntries.map(([, value]) => Number(value || 0)) : [0];
+  outageChart.data.labels = outageLabels;
+  outageChart.data.datasets[0].data = outageValues;
+  outageChart.data.datasets[0].backgroundColor = ['#f39c12', '#e67e22', '#d35400', '#27ae60', '#2c3e50'];
+  outageChart.update();
+
+  renderRecommendations(analytics.recommendations || ['Aucune recommandation disponible.']);
 }
 
 async function loadCompanies() {
@@ -169,6 +286,7 @@ async function loadCompanies() {
     }
 
     await loadSummary(selectedSummaryId);
+    await loadAnalytics(selectedSummaryId);
   } catch (error) {
     console.error(error);
     resetSummary();
@@ -189,6 +307,16 @@ async function loadSummary(companyId) {
   summaryFields.totalCost.textContent = formatCurrency(summary.totalCost);
   renderConsumptionRows(summary.consommationRecords || []);
   renderOutageRows(summary.outages || []);
+}
+
+async function loadAnalytics(companyId) {
+  if (!companyId) {
+    resetSummary();
+    return;
+  }
+
+  const analytics = await fetchJson(`/api/analytics/${encodeURIComponent(companyId)}`);
+  renderAnalytics(analytics);
 }
 
 async function initializeApp() {
@@ -294,6 +422,7 @@ document.getElementById('consumption-form').addEventListener('submit', async (ev
     const selectedCompany = document.getElementById('company-summary-select').value;
     if (selectedCompany) {
       await loadSummary(selectedCompany);
+      await loadAnalytics(selectedCompany);
     }
     await loadCompanies();
     alert('Consommation enregistrée avec succès.');
@@ -320,6 +449,7 @@ document.getElementById('outage-form').addEventListener('submit', async (event) 
     const selectedCompany = document.getElementById('company-summary-select').value;
     if (selectedCompany) {
       await loadSummary(selectedCompany);
+      await loadAnalytics(selectedCompany);
     }
     await loadCompanies();
     alert('Coupure enregistrée avec succès.');
@@ -330,22 +460,34 @@ document.getElementById('outage-form').addEventListener('submit', async (event) 
   }
 });
 
-document.getElementById('company-summary-select').addEventListener('change', (event) => {
-  loadSummary(event.target.value).catch((error) => alert(error.message));
+document.getElementById('company-summary-select').addEventListener('change', async (event) => {
+  const companyId = event.target.value;
+  if (companyId) {
+    await loadSummary(companyId);
+    await loadAnalytics(companyId);
+  }
 });
 
-document.getElementById('company-select-consumption').addEventListener('change', (event) => {
-  loadSummary(event.target.value).catch((error) => alert(error.message));
+document.getElementById('company-select-consumption').addEventListener('change', async (event) => {
+  const companyId = event.target.value;
+  if (companyId) {
+    await loadSummary(companyId);
+    await loadAnalytics(companyId);
+  }
 });
 
-document.getElementById('company-select-outage').addEventListener('change', (event) => {
-  loadSummary(event.target.value).catch((error) => alert(error.message));
+document.getElementById('company-select-outage').addEventListener('change', async (event) => {
+  const companyId = event.target.value;
+  if (companyId) {
+    await loadSummary(companyId);
+    await loadAnalytics(companyId);
+  }
 });
+
+initCharts();
+resetSummary();
 
 initializeApp().catch((error) => {
   console.error(error);
   toggleDashboard(null);
 });
-
-resetSummary();
-

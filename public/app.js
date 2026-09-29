@@ -159,6 +159,29 @@ button:disabled {
   color: #0f3a67;
 }
 
+.analytics-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.analytics-card {
+  min-height: 280px;
+}
+
+canvas {
+  width: 100% !important;
+  height: 220px !important;
+}
+
+.recommendations-list {
+  margin: 12px 0 0 20px;
+  padding: 0;
+  line-height: 1.7;
+  color: #1d2a39;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
