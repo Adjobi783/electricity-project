@@ -1,585 +1,94 @@
 const express = require('express');
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
-const bcrypt = require('bcryptjs');
-const session = require('express-session');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_DIR = path.join(__dirname, 'data');
-const DB_PATH = path.join(DB_DIR, 'powera.db');
-
-const CIE_TARIFF_KWH = 100;
-const GENERATOR_FUEL_PRICE_FCFA = 850;
-const GENERATOR_LITERS_PER_KWH = 0.25;
-const PRODUCTION_VALUE_PER_KWH = 4500;
-
-if (!fs.existsSync(DB_DIR)) {
-  fs.mkdirSync(DB_DIR, { recursive: true });
-}
 
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || 'powera-secret-key-2026',
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: 'lax',
-      maxAge: 60 * 60 * 1000
+app.use(express.static('public'));
+
+const DATA_FILE = path.join(__dirname, 'donnees.json');
+
+// Fonction pour lire les donnees sauvegardees
+function lireDonnees() {
+    if (!fs.existsSync(DATA_FILE)) {
+        return { incidents: [] };
     }
-  })
-);
-
-const db = new sqlite3.Database(DB_PATH, async (err) => {
-  if (err) {
-    console.error('Erreur de connexion à la base de données :', err.message);
-    process.exit(1);
-  }
-
-  console.log('Connexion SQLite établie :', DB_PATH);
-  await initializeDatabase();
-  console.log('Initialisation PowerA terminée.');
-});
-
-function runQuery(query, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(query, params, function (err) {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve({ id: this.lastID, changes: this.changes });
-    });
-  });
-}
-
-function getAll(query, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(query, params, (err, rows) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(rows);
-    });
-  });
-}
-
-function getOne(query, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(query, params, (err, row) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(row);
-    });
-  });
-}
-
-function roundToTwo(value) {
-  return Number(Number(value || 0).toFixed(2));
-}
-
-function calculateCieCost(kwh) {
-  return roundToTwo(kwh * CIE_TARIFF_KWH);
-}
-
-function calculateGeneratorCost(durationHours, affectedPowerKw) {
-  const liters = durationHours * affectedPowerKw * GENERATOR_LITERS_PER_KWH;
-  return roundToTwo(liters * GENERATOR_FUEL_PRICE_FCFA);
-}
-
-function calculateProductionLoss(durationHours, affectedPowerKw) {
-  const lostEnergyKwh = durationHours * affectedPowerKw;
-  return roundToTwo(lostEnergyKwh * PRODUCTION_VALUE_PER_KWH);
-}
-
-async function initializeDatabase() {
-  const queries = [
-    `CREATE TABLE IF NOT EXISTS companies (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      sector TEXT,
-      location TEXT,
-      installed_power_kw REAL DEFAULT 0,
-      contact_name TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )`,
-    `CREATE TABLE IF NOT EXISTS consumption_records (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      company_id INTEGER NOT NULL,
-      date TEXT NOT NULL,
-      kwh REAL NOT NULL,
-      source TEXT NOT NULL,
-      cost_estimate_fcfa REAL DEFAULT 0,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(company_id) REFERENCES companies(id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS outages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      company_id INTEGER NOT NULL,
-      start_time TEXT NOT NULL,
-      end_time TEXT NOT NULL,
-      duration_hours REAL NOT NULL,
-      affected_power_kw REAL NOT NULL,
-      outage_type TEXT DEFAULT 'coupure',
-      notes TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(company_id) REFERENCES companies(id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'manager',
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )`
-  ];
-
-  for (const query of queries) {
-    await runQuery(query);
-  }
-
-  await ensureDefaultAdmin();
-}
-
-async function ensureDefaultAdmin() {
-  const existing = await getOne('SELECT id FROM users WHERE email = ?', ['admin@powera.local']);
-  if (!existing) {
-    const defaultPassword = 'Admin123!';
-    const passwordHash = await bcrypt.hash(defaultPassword, 10);
-    await runQuery(
-      'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
-      ['Administrateur', 'admin@powera.local', passwordHash, 'admin']
-    );
-    console.log('Compte administrateur créé : admin@powera.local / Admin123!');
-  }
-}
-
-function getCompanySummary(companyId) {
-  return new Promise(async (resolve, reject) => {
     try {
-      const company = await getOne('SELECT * FROM companies WHERE id = ?', [companyId]);
-      if (!company) {
-        resolve({
-          company: null,
-          totalConsumptionKwh: 0,
-          totalOutageHours: 0,
-          cieCost: 0,
-          generatorCost: 0,
-          productionLoss: 0,
-          totalCost: 0,
-          consommationRecords: [],
-          outages: []
-        });
-        return;
-      }
-
-      const consumptionRecords = await getAll(
-        'SELECT * FROM consumption_records WHERE company_id = ? ORDER BY date DESC',
-        [companyId]
-      );
-
-      const outages = await getAll(
-        'SELECT * FROM outages WHERE company_id = ? ORDER BY start_time DESC',
-        [companyId]
-      );
-
-      const totalConsumptionKwh = consumptionRecords.reduce((sum, row) => sum + Number(row.kwh || 0), 0);
-      const totalOutageHours = outages.reduce((sum, row) => sum + Number(row.duration_hours || 0), 0);
-      const cieCost = consumptionRecords.reduce((sum, row) => sum + Number(row.cost_estimate_fcfa || 0), 0);
-      const generatorCost = outages.reduce((sum, row) => {
-        return sum + calculateGeneratorCost(Number(row.duration_hours || 0), Number(row.affected_power_kw || 0));
-      }, 0);
-      const productionLoss = outages.reduce((sum, row) => {
-        return sum + calculateProductionLoss(Number(row.duration_hours || 0), Number(row.affected_power_kw || 0));
-      }, 0);
-      const totalCost = cieCost + generatorCost + productionLoss;
-
-      resolve({
-        company,
-        totalConsumptionKwh: roundToTwo(totalConsumptionKwh),
-        totalOutageHours: roundToTwo(totalOutageHours),
-        cieCost: roundToTwo(cieCost),
-        generatorCost: roundToTwo(generatorCost),
-        productionLoss: roundToTwo(productionLoss),
-        totalCost: roundToTwo(totalCost),
-        consommationRecords: consumptionRecords,
-        outages
-      });
-    } catch (error) {
-      reject(error);
+        const content = fs.readFileSync(DATA_FILE, 'utf8');
+        return JSON.parse(content || '{"incidents":[]}');
+    } catch (e) {
+        return { incidents: [] };
     }
-  });
 }
 
-function requireAuth(req, res, next) {
-  if (!req.session || !req.session.user) {
-    return res.status(401).json({ error: 'Authentification requise.' });
-  }
-  next();
+// Fonction pour sauvegarder les donnees
+function sauvegarderDonnees(data) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-function requireRole(allowedRoles) {
-  const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
-
-  return (req, res, next) => {
-    if (!req.session || !req.session.user) {
-      return res.status(401).json({ error: 'Authentification requise.' });
-    }
-
-    if (!roles.includes(req.session.user.role)) {
-      return res.status(403).json({ error: 'Accès interdit pour ce rôle.' });
-    }
-
-    next();
-  };
-}
-
-function buildAnalytics(companyId) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const summary = await getCompanySummary(companyId);
-      const { consommationRecords: records = [], outages = [] } = summary;
-
-      const monthlyTrend = [];
-      const monthMap = new Map();
-
-      records.forEach((record) => {
-        const date = new Date(record.date);
-        if (Number.isNaN(date.getTime())) return;
-
-        const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-        const label = date.toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' });
-
-        monthMap.set(key, {
-          label,
-          value: (monthMap.get(key)?.value || 0) + Number(record.kwh || 0)
-        });
-      });
-
-      Array.from(monthMap.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .forEach(([, value]) => monthlyTrend.push(value));
-
-      const sourceBreakdown = {};
-      records.forEach((record) => {
-        const source = record.source || 'Inconnu';
-        sourceBreakdown[source] = sourceBreakdown[source] || { kwh: 0 };
-        sourceBreakdown[source].kwh += Number(record.kwh || 0);
-      });
-
-      const outageTypes = {};
-      outages.forEach((outage) => {
-        const type = outage.outage_type || 'coupure';
-        outageTypes[type] = (outageTypes[type] || 0) + Number(outage.duration_hours || 0);
-      });
-
-      const recommendations = [];
-      if (summary.totalCost > 5000000) {
-        recommendations.push('Le coût total est élevé : réduire les pertes de production et optimiser la génération de secours.');
-      }
-      if (summary.totalOutageHours > 20) {
-        recommendations.push('La durée des coupures est importante : renforcer la maintenance et la fiabilité du réseau.');
-      }
-      if (Object.keys(sourceBreakdown).length > 0) {
-        recommendations.push('Diversifier les sources d’énergie pour sécuriser la production et réduire la dépendance.');
-      }
-      if (recommendations.length === 0) {
-        recommendations.push('Aucune recommandation spéciale : la performance énergétique est stable.');
-      }
-
-      resolve({
-        monthlyTrend,
-        sourceBreakdown,
-        outageTypes,
-        recommendations
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
+// Route de test d'etat (Healthcheck)
 app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    message: 'PowerA est en ligne',
-    timestamp: new Date().toISOString()
-  });
+    res.json({ status: "OK", message: "Serveur PowerA operationnel" });
 });
 
-app.post('/api/auth/register', async (req, res) => {
-  const { name, email, password, role } = req.body;
-
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: 'Nom, email et mot de passe sont obligatoires.' });
-  }
-
-  if (String(password).length < 6) {
-    return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères.' });
-  }
-
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const userRole = role === 'admin' ? 'admin' : 'manager';
-
-  try {
-    const existing = await getOne('SELECT * FROM users WHERE email = ?', [normalizedEmail]);
-    if (existing) {
-      return res.status(409).json({ error: 'Un compte existe déjà avec cet email.' });
+// API 1 : Calculateur de consommation (CIE)
+app.post('/api/calcul-energie', (req, res) => {
+    const { puissanceKw, heuresParJour, tarifKwh } = req.body;
+    if (!puissanceKw || !heuresParJour) {
+        return res.status(400).json({ error: "Champs puissance et heures requis." });
     }
+    const tarif = tarifKwh ? parseFloat(tarifKwh) : 85; // Tarif moyen 85 FCFA / kWh
+    const kwhMois = parseFloat(puissanceKw) * parseFloat(heuresParJour) * 30;
+    const coutMoisFCFA = Math.round(kwhMois * tarif);
 
-    const passwordHash = await bcrypt.hash(String(password), 10);
-    const result = await runQuery(
-      'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
-      [String(name).trim(), normalizedEmail, passwordHash, userRole]
-    );
-
-    const user = await getOne('SELECT id, name, email, role FROM users WHERE id = ?', [result.id]);
-    req.session.user = user;
-
-    res.status(201).json({ message: 'Compte créé avec succès.', user });
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de créer le compte utilisateur.', details: error.message });
-  }
+    res.json({
+        kwhMois: kwhMois.toFixed(2),
+        coutMoisFCFA: coutMoisFCFA.toLocaleString('fr-FR')
+    });
 });
 
-app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email et mot de passe sont requis.' });
-  }
-
-  try {
-    const normalizedEmail = String(email).trim().toLowerCase();
-    const user = await getOne('SELECT * FROM users WHERE email = ?', [normalizedEmail]);
-
-    if (!user) {
-      return res.status(401).json({ error: 'Identifiants invalides.' });
+// API 2 : Enregistrer une panne / incident
+app.post('/api/incidents', (req, res) => {
+    const { equipement, cause, dureeMinutes, coutHeureArret } = req.body;
+    if (!equipement || !dureeMinutes) {
+        return res.status(400).json({ error: "Nom d'equipement et duree requis." });
     }
 
-    const isPasswordValid = await bcrypt.compare(String(password), user.password_hash);
-    if (!isPasswordValid) {
-      return res.status(401).json({ error: 'Identifiants invalides.' });
-    }
+    const data = lireDonnees();
+    const tarifArret = coutHeureArret ? parseFloat(coutHeureArret) : 50000; // 50 000 FCFA/h par defaut
+    const perteFCFA = Math.round((parseFloat(dureeMinutes) / 60) * tarifArret);
 
-    req.session.user = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role
+    const nouvelIncident = {
+        id: data.incidents.length + 1,
+        equipement,
+        cause: cause || "Coupure / Baisse de tension CIE",
+        dureeMinutes: parseFloat(dureeMinutes),
+        perteFCFA,
+        date: new Date().toLocaleString('fr-FR')
     };
 
-    res.json({ message: 'Connexion réussie.', user: req.session.user });
-  } catch (error) {
-    res.status(500).json({ error: 'Erreur de connexion.', details: error.message });
-  }
+    data.incidents.push(nouvelIncident);
+    sauvegarderDonnees(data);
+
+    res.json({ message: "Arret enregistre et sauvegarde avec succes !", incident: nouvelIncident });
 });
 
-app.post('/api/auth/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      return res.status(500).json({ error: 'Impossible de fermer la session.' });
-    }
+// API 3 : Rapport global des pertes
+app.get('/api/incidents', (req, res) => {
+    const data = lireDonnees();
+    const totalPertes = data.incidents.reduce((acc, curr) => acc + curr.perteFCFA, 0);
+    const totalMinutes = data.incidents.reduce((acc, curr) => acc + curr.dureeMinutes, 0);
 
-    res.clearCookie('connect.sid');
-    res.json({ message: 'Déconnexion réussie.' });
-  });
-});
-
-app.get('/api/auth/me', (req, res) => {
-  if (!req.session || !req.session.user) {
-    return res.status(401).json({ error: 'Non authentifié.' });
-  }
-
-  res.json(req.session.user);
-});
-
-app.get('/api/users', requireAuth, requireRole(['admin']), async (req, res) => {
-  try {
-    const users = await getAll('SELECT id, name, email, role, created_at FROM users ORDER BY created_at DESC');
-    res.json(users);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de récupérer les utilisateurs.', details: error.message });
-  }
-});
-
-app.get('/api/companies', requireAuth, async (req, res) => {
-  try {
-    const companies = await getAll('SELECT * FROM companies ORDER BY created_at DESC');
-    res.json(companies);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de récupérer les entreprises', details: error.message });
-  }
-});
-
-app.post('/api/companies', requireAuth, async (req, res) => {
-  const { name, sector, location, installed_power_kw, contact_name } = req.body;
-
-  if (!name || !name.trim()) {
-    return res.status(400).json({ error: 'Le nom de l’entreprise est obligatoire.' });
-  }
-
-  try {
-    const result = await runQuery(
-      'INSERT INTO companies (name, sector, location, installed_power_kw, contact_name) VALUES (?, ?, ?, ?, ?)',
-      [name.trim(), sector || '', location || '', Number(installed_power_kw || 0), contact_name || '']
-    );
-
-    const company = await getOne('SELECT * FROM companies WHERE id = ?', [result.id]);
-    res.status(201).json(company);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible d’ajouter l’entreprise', details: error.message });
-  }
-});
-
-app.get('/api/consumption', requireAuth, async (req, res) => {
-  const { companyId } = req.query;
-
-  try {
-    let query = 'SELECT * FROM consumption_records';
-    const params = [];
-
-    if (companyId) {
-      query += ' WHERE company_id = ?';
-      params.push(Number(companyId));
-    }
-
-    query += ' ORDER BY date DESC';
-
-    const records = await getAll(query, params);
-    res.json(records);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de récupérer les consommations', details: error.message });
-  }
-});
-
-app.post('/api/consumption', requireAuth, async (req, res) => {
-  const { company_id, date, kwh, source } = req.body;
-
-  if (!company_id || !date || !kwh) {
-    return res.status(400).json({ error: 'Tous les champs obligatoires doivent être remplis.' });
-  }
-
-  try {
-    const energyKwh = Number(kwh);
-    const cieCost = calculateCieCost(energyKwh);
-
-    const result = await runQuery(
-      'INSERT INTO consumption_records (company_id, date, kwh, source, cost_estimate_fcfa) VALUES (?, ?, ?, ?, ?)',
-      [Number(company_id), date, energyKwh, source || 'CIE', cieCost]
-    );
-
-    const record = await getOne('SELECT * FROM consumption_records WHERE id = ?', [result.id]);
-    res.status(201).json(record);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible d’ajouter la consommation', details: error.message });
-  }
-});
-
-app.get('/api/outages', requireAuth, async (req, res) => {
-  const { companyId } = req.query;
-
-  try {
-    let query = 'SELECT * FROM outages';
-    const params = [];
-
-    if (companyId) {
-      query += ' WHERE company_id = ?';
-      params.push(Number(companyId));
-    }
-
-    query += ' ORDER BY start_time DESC';
-
-    const outages = await getAll(query, params);
-    res.json(outages);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de récupérer les coupures', details: error.message });
-  }
-});
-
-app.post('/api/outages', requireAuth, async (req, res) => {
-  const {
-    company_id,
-    start_time,
-    end_time,
-    duration_hours,
-    affected_power_kw,
-    outage_type,
-    notes
-  } = req.body;
-
-  if (!company_id || !start_time || !end_time || !duration_hours || !affected_power_kw) {
-    return res.status(400).json({ error: 'Les champs de la coupure sont incomplets.' });
-  }
-
-  try {
-    const startDate = new Date(start_time);
-    const endDate = new Date(end_time);
-
-    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
-      return res.status(400).json({ error: 'Les dates de début et de fin de coupure sont invalides.' });
-    }
-
-    const duration = Number(duration_hours);
-    const power = Number(affected_power_kw);
-
-    const result = await runQuery(
-      `INSERT INTO outages (company_id, start_time, end_time, duration_hours, affected_power_kw, outage_type, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [Number(company_id), start_time, end_time, duration, power, outage_type || 'coupure', notes || '']
-    );
-
-    const outage = await getOne('SELECT * FROM outages WHERE id = ?', [result.id]);
-    res.status(201).json(outage);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible d’ajouter la coupure', details: error.message });
-  }
-});
-
-app.get('/api/summary', requireAuth, async (req, res) => {
-  const { companyId } = req.query;
-
-  if (!companyId) {
-    return res.status(400).json({ error: 'L’identifiant de l’entreprise est requis.' });
-  }
-
-  try {
-    const summary = await getCompanySummary(Number(companyId));
-    res.json(summary);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de calculer le bilan énergétique', details: error.message });
-  }
-});
-
-app.get('/api/analytics/:companyId', requireAuth, async (req, res) => {
-  const { companyId } = req.params;
-
-  if (!companyId) {
-    return res.status(400).json({ error: 'L’identifiant de l’entreprise est requis.' });
-  }
-
-  try {
-    const analytics = await buildAnalytics(Number(companyId));
-    res.json(analytics);
-  } catch (error) {
-    res.status(500).json({ error: 'Impossible de calculer les analyses', details: error.message });
-  }
-});
-
-app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    res.json({
+        totalIncidents: data.incidents.length,
+        totalHeuresArret: (totalMinutes / 60).toFixed(1),
+        totalPertesFCFA: totalPertes.toLocaleString('fr-FR'),
+        liste: data.incidents
+    });
 });
 
 app.listen(PORT, () => {
-  console.log(`PowerA démarré sur http://localhost:${PORT}`);
+    console.log(`=== Serveur PowerA demarre sur http://localhost:${PORT} ===`);
 });
