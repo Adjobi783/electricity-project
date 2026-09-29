@@ -1,196 +1,208 @@
-const companySelects = [
-  document.getElementById('company-select-consumption'),
-  document.getElementById('company-select-outage'),
-  document.getElementById('company-summary-select')
-];
-
-const consumptionTableBody = document.getElementById('consumption-table-body');
-const outageTableBody = document.getElementById('outage-table-body');
-
-const summaryFields = {
-  totalConsumption: document.getElementById('total-consumption'),
-  cieCost: document.getElementById('cie-cost'),
-  generatorCost: document.getElementById('generator-cost'),
-  productionLoss: document.getElementById('production-loss'),
-  totalCost: document.getElementById('total-cost')
-};
-
-function formatNumber(value) {
-  return Number(value || 0).toLocaleString('fr-FR', {
-    maximumFractionDigits: 2
-  });
+body {
+  font-family: Arial, sans-serif;
+  background: #f3f7fb;
+  margin: 0;
+  color: #1d2a39;
 }
 
-function formatCurrency(value) {
-  return `${formatNumber(value)} FCFA`;
+* {
+  box-sizing: border-box;
 }
 
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>'"]/g, (character) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    "'": '&#039;',
-    '"': '&quot;'
-  }[character]));
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
 }
 
-async function fetchJson(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(options.headers || {})
-    }
-  });
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: linear-gradient(135deg, #0f3a67, #1f6fbf);
+  color: white;
+  padding: 24px;
+  border-radius: 18px;
+  margin-bottom: 24px;
+  gap: 16px;
+}
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.error || 'Une erreur est survenue.');
+.topbar h1 {
+  margin: 0 0 8px;
+  font-size: 2rem;
+}
+
+.topbar p {
+  margin: 0;
+  opacity: 0.9;
+}
+
+.user-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.12);
+  padding: 10px 14px;
+  border-radius: 12px;
+}
+
+.user-box button {
+  background: white;
+  color: #0f3a67;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-weight: bold;
+}
+
+.auth-shell {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.auth-card {
+  min-height: 100%;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.card {
+  background: white;
+  border-radius: 16px;
+  padding: 18px;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.06);
+}
+
+.card h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.9rem;
+  font-weight: bold;
+  color: #26374a;
+  margin-bottom: 10px;
+}
+
+input,
+select,
+textarea,
+button {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #cbd5e1;
+  font-size: 0.95rem;
+}
+
+textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+
+button {
+  background: #0f6bdc;
+  color: white;
+  border: none;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+button:hover {
+  background: #0b5ab8;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.metric-box {
+  background: #ecf5ff;
+  border-left: 5px solid #0f6bdc;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.metric-box .label {
+  font-size: 0.85rem;
+  color: #3d4b5d;
+}
+
+.metric-box .value {
+  font-size: 1.7rem;
+  font-weight: bold;
+  margin-top: 8px;
+  color: #0f3a67;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+}
+
+th, td {
+  padding: 12px 10px;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+th {
+  background: #eef4fb;
+}
+
+.select-row {
+  margin-bottom: 16px;
+}
+
+.empty-state {
+  color: #64748b;
+  font-style: italic;
+}
+
+.hidden {
+  display: none !important;
+}
+
+@media (max-width: 768px) {
+  .container {
+    padding: 16px;
   }
-  return data;
-}
 
-function setSelectOptions(companies) {
-  companySelects.forEach((select) => {
-    const currentValue = select.value;
-    select.innerHTML = '<option value="">Sélectionner une entreprise</option>';
-
-    companies.forEach((company) => {
-      const option = document.createElement('option');
-      option.value = company.id;
-      option.textContent = company.name;
-      select.appendChild(option);
-    });
-
-    if (companies.some((company) => String(company.id) === currentValue)) {
-      select.value = currentValue;
-    }
-  });
-}
-
-function renderConsumptionRows(records) {
-  if (!records.length) {
-    consumptionTableBody.innerHTML = '<tr><td colspan="4" class="empty-state">Aucune donnée disponible.</td></tr>';
-    return;
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
-  consumptionTableBody.innerHTML = records.map((record) => `
-    <tr>
-      <td>${escapeHtml(record.date)}</td>
-      <td>${escapeHtml(record.source)}</td>
-      <td>${formatNumber(record.kwh)} kWh</td>
-      <td>${formatCurrency(record.cost_estimate_fcfa)}</td>
-    </tr>
-  `).join('');
-}
-
-function renderOutageRows(outages) {
-  if (!outages.length) {
-    outageTableBody.innerHTML = '<tr><td colspan="4" class="empty-state">Aucune coupure enregistrée.</td></tr>';
-    return;
-  }
-
-  outageTableBody.innerHTML = outages.map((outage) => `
-    <tr>
-      <td>${escapeHtml(new Date(outage.start_time).toLocaleString('fr-FR'))}</td>
-      <td>${escapeHtml(new Date(outage.end_time).toLocaleString('fr-FR'))}</td>
-      <td>${formatNumber(outage.duration_hours)} h</td>
-      <td>${formatNumber(outage.affected_power_kw)} kW</td>
-    </tr>
-  `).join('');
-}
-
-function resetSummary() {
-  summaryFields.totalConsumption.textContent = '0 kWh';
-  summaryFields.cieCost.textContent = '0 FCFA';
-  summaryFields.generatorCost.textContent = '0 FCFA';
-  summaryFields.productionLoss.textContent = '0 FCFA';
-  summaryFields.totalCost.textContent = '0 FCFA';
-  renderConsumptionRows([]);
-  renderOutageRows([]);
-}
-
-async function loadCompanies() {
-  const companies = await fetchJson('/api/companies');
-  setSelectOptions(companies);
-
-  if (!companies.length) {
-    resetSummary();
-    return;
-  }
-
-  const selectedSummaryId = document.getElementById('company-summary-select').value || companies[0].id;
-  document.getElementById('company-summary-select').value = selectedSummaryId;
-  document.getElementById('company-select-consumption').value ||= companies[0].id;
-  document.getElementById('company-select-outage').value ||= companies[0].id;
-
-  await loadSummary(selectedSummaryId);
-}
-
-async function loadSummary(companyId) {
-  if (!companyId) {
-    resetSummary();
-    return;
-  }
-
-  const summary = await fetchJson(`/api/summary?companyId=${encodeURIComponent(companyId)}`);
-  summaryFields.totalConsumption.textContent = `${formatNumber(summary.totalConsumptionKwh)} kWh`;
-  summaryFields.cieCost.textContent = formatCurrency(summary.cieCost);
-  summaryFields.generatorCost.textContent = formatCurrency(summary.generatorCost);
-  summaryFields.productionLoss.textContent = formatCurrency(summary.productionLoss);
-  summaryFields.totalCost.textContent = formatCurrency(summary.totalCost);
-  renderConsumptionRows(summary.consommationRecords || []);
-  renderOutageRows(summary.outages || []);
-}
-
-async function handleFormSubmit(event, endpoint, successMessage) {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector('button[type="submit"]');
-  button.disabled = true;
-
-  try {
-    const payload = Object.fromEntries(new FormData(form).entries());
-    await fetchJson(endpoint, {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    });
-
-    form.reset();
-    await loadCompanies();
-    alert(successMessage);
-  } catch (error) {
-    alert(error.message);
-  } finally {
-    button.disabled = false;
+  .topbar h1 {
+    font-size: 1.5rem;
   }
 }
-
-document.getElementById('company-form').addEventListener('submit', (event) => {
-  handleFormSubmit(event, '/api/companies', 'Entreprise enregistrée avec succès.');
-});
-
-document.getElementById('consumption-form').addEventListener('submit', (event) => {
-  handleFormSubmit(event, '/api/consumption', 'Consommation enregistrée avec succès.');
-});
-
-document.getElementById('outage-form').addEventListener('submit', (event) => {
-  handleFormSubmit(event, '/api/outages', 'Coupure enregistrée avec succès.');
-});
-
-document.getElementById('company-summary-select').addEventListener('change', (event) => {
-  loadSummary(event.target.value).catch((error) => alert(error.message));
-});
-
-document.getElementById('company-select-consumption').addEventListener('change', (event) => {
-  loadSummary(event.target.value).catch((error) => alert(error.message));
-});
-
-document.getElementById('company-select-outage').addEventListener('change', (event) => {
-  loadSummary(event.target.value).catch((error) => alert(error.message));
-});
-
-loadCompanies().catch((error) => {
-  alert(`Impossible de charger PowerA : ${error.message}`);
-});
